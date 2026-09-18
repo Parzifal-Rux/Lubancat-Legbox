@@ -32,12 +32,12 @@ CALIB_SAMPLES = 500
 PWR_MGMT_1   = 0x6B
 ACCEL_CONFIG = 0x1C
 GYRO_CONFIG  = 0x1B
-ACCEL_XOUT_H = 0x3B
-GYRO_XOUT_H  = 0x43
+ACCEL_XOUT = 0x3B
+GYRO_XOUT  = 0x43
 
 # 量程 LSB
-ACCEL_LSB = 8192.0   # ±4g
-GYRO_LSB  = 16.4     # ±2000°/s
+ACCEL_SENS = 8192.0   # ±4g
+GYRO_SENS  = 16.4     # ±2000°/s
 
 # 帧头/帧尾
 FRAME_HEAD = b"\xAA\x55"
@@ -45,77 +45,108 @@ FRAME_TAIL = b"\x0D\x0A"
 
 
 class MPU6050:
-    """MPU6050 姿态读取（互补滤波）"""
+    """MPU6050 姿态读取（互补滤波，来自 mpu6050.py）"""
 
     def __init__(self, bus=I2C_BUS, addr=MPU_ADDR):
         self.bus = SMBus(bus)
         self.addr = addr
-        # 唤醒 + 量程配置
-        self.bus.write_byte_data(addr, PWR_MGMT_1, 0x00)
-        time.sleep(0.1)
-        self.bus.write_byte_data(addr, GYRO_CONFIG, 0x18)    # ±2000°/s
-        self.bus.write_byte_data(addr, ACCEL_CONFIG, 0x08)   # ±4g
-        time.sleep(0.01)
-        # 滤波参数
-        self.alpha = 0.98
+        self.gyro_offset = [0.0, 0.0, 0.0]
         self.roll = 0.0
         self.pitch = 0.0
         self.yaw = 0.0
-        # 陀螺仪零偏
-        self.g_offset = [0.0, 0.0, 0.0]
+        self.alpha = 0.98
+        self.last_time = None
 
-    def _read_word(self, reg):
-        data = self.bus.read_i2c_block_data(self.addr, reg, 2)
-        val = (data[0] << 8) | data[1]
+    # ===== I2C 读写 =====
+    @staticmethod
+    def _word(hi, lo):
+        """两个字节转 16 位有符号整数"""
+        val = (hi << 8) | lo
         if val >= 0x8000:
             val -= 0x10000
         return val
 
+    def _read_word(self, reg):
+        # 读取 16 位有符号值（大端）
+        data = self.bus.read_i2c_block_data(self.addr, reg, 2)
+        return self._word(data[0], data[1])
+
+    def _write_byte(self, reg, val):
+        self.bus.write_byte_data(self.addr, reg, val)
+
+    # ===== 初始化 =====
+    def init(self):
+        self._write_byte(PWR_MGMT_1, 0x00)   # 唤醒
+        time.sleep(0.1)
+        self._write_byte(GYRO_CONFIG, 0x18)   # 陀螺仪 ±2000°/s
+        self._write_byte(ACCEL_CONFIG, 0x08)   # 加速度 ±4g
+        time.sleep(0.1)
+
+    # ===== 读加速度 (g) — burst read 6 字节 =====
     def read_accel(self):
-        ax = self._read_word(ACCEL_XOUT_H)     / ACCEL_LSB
-        ay = self._read_word(ACCEL_XOUT_H + 2) / ACCEL_LSB
-        az = self._read_word(ACCEL_XOUT_H + 4) / ACCEL_LSB
+        data = self.bus.read_i2c_block_data(self.addr, ACCEL_XOUT, 6)
+        ax = self._word(data[0], data[1]) / ACCEL_SENS
+        ay = self._word(data[2], data[3]) / ACCEL_SENS
+        az = self._word(data[4], data[5]) / ACCEL_SENS
         return ax, ay, az
 
+    # ===== 读陀螺仪 (°/s) 未校准 — burst read 6 字节 =====
     def read_gyro_raw(self):
-        gx = self._read_word(GYRO_XOUT_H)     / GYRO_LSB
-        gy = self._read_word(GYRO_XOUT_H + 2) / GYRO_LSB
-        gz = self._read_word(GYRO_XOUT_H + 4) / GYRO_LSB
+        data = self.bus.read_i2c_block_data(self.addr, GYRO_XOUT, 6)
+        gx = self._word(data[0], data[1]) / GYRO_SENS
+        gy = self._word(data[2], data[3]) / GYRO_SENS
+        gz = self._word(data[4], data[5]) / GYRO_SENS
         return gx, gy, gz
 
+    # ===== 读陀螺仪 (校准后) =====
     def read_gyro(self):
         gx, gy, gz = self.read_gyro_raw()
-        return (gx - self.g_offset[0],
-                gy - self.g_offset[1],
-                gz - self.g_offset[2])
+        gx -= self.gyro_offset[0]
+        gy -= self.gyro_offset[1]
+        gz -= self.gyro_offset[2]
+        return gx, gy, gz
 
-    def calibrate(self, samples=CALIB_SAMPLES):
-        print(f"校准中... 请保持 MPU6050 静止 {samples} 次")
-        sx = sy = sz = 0.0
-        for _ in range(samples):
+    # ===== 陀螺仪零偏校准 =====
+    def calibrate_gyro(self):
+        print(f"校准中... 请保持 MPU6050 静止 {CALIB_SAMPLES} 次")
+        gx_sum = gy_sum = gz_sum = 0.0
+        for _ in range(CALIB_SAMPLES):
             gx, gy, gz = self.read_gyro_raw()
-            sx += gx; sy += gy; sz += gz
+            gx_sum += gx
+            gy_sum += gy
+            gz_sum += gz
             time.sleep(0.002)
-        self.g_offset[0] = sx / samples
-        self.g_offset[1] = sy / samples
-        self.g_offset[2] = sz / samples
-        print(f"校准完成: offset=({self.g_offset[0]:.2f}, "
-              f"{self.g_offset[1]:.2f}, {self.g_offset[2]:.2f})")
+        self.gyro_offset = [gx_sum / CALIB_SAMPLES,
+                            gy_sum / CALIB_SAMPLES,
+                            gz_sum / CALIB_SAMPLES]
+        print(f"校准完成: offset=({self.gyro_offset[0]:.2f}, "
+              f"{self.gyro_offset[1]:.2f}, {self.gyro_offset[2]:.2f})")
 
-    def update(self, dt):
+    # ===== 获取时间差 (秒) =====
+    def _get_dt(self):
+        now = time.monotonic()
+        if self.last_time is None:
+            self.last_time = now
+            return 0.0
+        dt = now - self.last_time
+        self.last_time = now
+        return dt
+
+    # ===== 互补滤波更新姿态 =====
+    def update(self):
         ax, ay, az = self.read_accel()
         gx, gy, gz = self.read_gyro()
 
-        # 加速度计计算 Roll/Pitch
-        roll_acc  = math.atan2(ay, az) * 180.0 / math.pi
-        pitch_acc = math.atan2(-ax, math.sqrt(ay*ay + az*az)) * 180.0 / math.pi
+        # 加速度算角度
+        acc_roll = math.atan2(ay, az) * 180.0 / math.pi
+        acc_pitch = math.atan2(-ax, math.sqrt(ay * ay + az * az)) * 180.0 / math.pi
+
+        dt = self._get_dt()
 
         # 互补滤波
-        self.roll  = self.alpha * (self.roll  + gx * dt) + (1 - self.alpha) * roll_acc
-        self.pitch = self.alpha * (self.pitch + gy * dt) + (1 - self.alpha) * pitch_acc
-        self.yaw  += gz * dt   # Yaw 纯积分（会漂移）
-
-        return self.roll, self.pitch, self.yaw, ax, ay, az
+        self.roll = self.alpha * (self.roll + gx * dt) + (1 - self.alpha) * acc_roll
+        self.pitch = self.alpha * (self.pitch + gy * dt) + (1 - self.alpha) * acc_pitch
+        self.yaw += gz * dt   # Yaw 靠积分，会漂移
 
 
 def build_frame(roll, pitch, yaw):
@@ -136,10 +167,11 @@ def main():
 
     # 初始化 MPU6050
     mpu = MPU6050()
+    mpu.init()
     print("MPU6050 初始化成功")
 
     # 校准
-    mpu.calibrate()
+    mpu.calibrate_gyro()
 
     # 打开串口
     ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=0.01)
@@ -157,17 +189,16 @@ def main():
 
     try:
         while True:
-            now = time.monotonic()
-            dt = now - last_time
-            last_time = now
-
-            roll, pitch, yaw, _, _, _ = mpu.update(dt)
+            # 更新姿态 (mpu6050.py 内部管理 dt)
+            mpu.update()
+            roll, pitch, yaw = mpu.roll, mpu.pitch, mpu.yaw
 
             # 发送给 ESP32
             frame = build_frame(roll, pitch, yaw)
             ser.write(frame)
 
             # FPS 统计 + 打印
+            now = time.monotonic()
             frame_count += 1
             if now - fps_timer >= 1.0:
                 fps = frame_count

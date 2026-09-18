@@ -31,7 +31,8 @@
 #define RS485_BAUD   4000000   // Go1 电机 4Mbps
 
 // 鲁班猫 → ESP32 帧定义
-#define FRAME_LEN     14
+// 帧: [0xAA][0x55][Roll:f32][Pitch:f32][Yaw:f32][xor][0x0D][0x0A] = 17 字节
+#define FRAME_LEN     17
 #define FRAME_HEAD0  0xAA
 #define FRAME_HEAD1  0x55
 #define FRAME_TAIL0  0x0D
@@ -188,22 +189,14 @@ void send_motor_cmd() {
 }
 
 // ========== RGB LED 状态指示 ==========
-// 规则: 任一轴 >  +阈值 → 蓝灯
-//       任一轴 <  -阈值 → 红灯
-//       同时有正负      → 紫色 (红+蓝混色)
-//       全部在 ±阈值内   → 不亮 (平稳)
+// 规则: Pitch >  +5° → 蓝灯
+//       Pitch <  -5° → 红灯
+//       |Pitch| ≤ 5° → 不亮 (平稳)
 void update_led() {
-  bool has_pos = (roll  >  STABLE_THRESH) ||
-                 (pitch >  STABLE_THRESH) ||
-                 (yaw   >  STABLE_THRESH);
-  bool has_neg = (roll  < -STABLE_THRESH) ||
-                 (pitch < -STABLE_THRESH) ||
-                 (yaw   < -STABLE_THRESH);
-
   uint8_t r = 0, g = 0, b = 0;
-  if (has_pos) b = 255;        // 正 → 蓝
-  if (has_neg) r = 255;        // 负 → 红
-  // 全部平稳 → r=g=b=0 (黑, 不亮)
+  if (pitch >  STABLE_THRESH) b = 255;   // 正 → 蓝
+  else if (pitch < -STABLE_THRESH) r = 255;  // 负 → 红
+  // 平稳 → r=g=b=0 (黑, 不亮)
 
   led.setPixelColor(0, led.Color(r, g, b));
   led.show();

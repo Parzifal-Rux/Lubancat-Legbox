@@ -36,13 +36,18 @@ class MPU6050:
         self.last_time = None
 
     # ===== I2C 读写 =====
-    def _read_word(self, reg):
-        # 读取 16 位有符号值（大端）
-        data = self.bus.read_i2c_block_data(self.addr, reg, 2)
-        val = (data[0] << 8) | data[1]
+    @staticmethod
+    def _word(hi, lo):
+        """两个字节转 16 位有符号整数"""
+        val = (hi << 8) | lo
         if val >= 0x8000:
             val -= 0x10000
         return val
+
+    def _read_word(self, reg):
+        # 读取 16 位有符号值（大端）
+        data = self.bus.read_i2c_block_data(self.addr, reg, 2)
+        return self._word(data[0], data[1])
 
     def _write_byte(self, reg, val):
         self.bus.write_byte_data(self.addr, reg, val)
@@ -55,18 +60,20 @@ class MPU6050:
         self._write_byte(ACCEL_CONFIG, 0x08)  # 加速度 ±4g
         time.sleep(0.1)
 
-    # ===== 读加速度 (g) =====
+    # ===== 读加速度 (g) — burst read 6 字节 =====
     def read_accel(self):
-        ax = self._read_word(ACCEL_XOUT) / ACCEL_SENS
-        ay = self._read_word(ACCEL_XOUT + 2) / ACCEL_SENS
-        az = self._read_word(ACCEL_XOUT + 4) / ACCEL_SENS
+        data = self.bus.read_i2c_block_data(self.addr, ACCEL_XOUT, 6)
+        ax = self._word(data[0], data[1]) / ACCEL_SENS
+        ay = self._word(data[2], data[3]) / ACCEL_SENS
+        az = self._word(data[4], data[5]) / ACCEL_SENS
         return ax, ay, az
 
-    # ===== 读陀螺仪 (°/s) 未校准 =====
+    # ===== 读陀螺仪 (°/s) 未校准 — burst read 6 字节 =====
     def read_gyro_raw(self):
-        gx = self._read_word(GYRO_XOUT) / GYRO_SENS
-        gy = self._read_word(GYRO_XOUT + 2) / GYRO_SENS
-        gz = self._read_word(GYRO_XOUT + 4) / GYRO_SENS
+        data = self.bus.read_i2c_block_data(self.addr, GYRO_XOUT, 6)
+        gx = self._word(data[0], data[1]) / GYRO_SENS
+        gy = self._word(data[2], data[3]) / GYRO_SENS
+        gz = self._word(data[4], data[5]) / GYRO_SENS
         return gx, gy, gz
 
     # ===== 读陀螺仪 (校准后) =====
