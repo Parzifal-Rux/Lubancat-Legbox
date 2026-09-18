@@ -1,0 +1,24 @@
+# Arduino build artifacts
+/build/
+*.elf
+*.hex
+*.bin
+*.map
+
+# IDE / editor
+.vscode/
+.idea/
+*.code-workspace
+
+# Toolchain / large binaries (download separately)
+*.zip
+*.tar.gz
+*.7z
+*.rar
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 临时文件
+tmp_*.json
